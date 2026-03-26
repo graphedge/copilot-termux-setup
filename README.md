@@ -11,23 +11,28 @@ The `setup.sh` script performs the following tasks:
 - Compiles and configures native Node.js modules:
   - **node-pty**: For pseudo-terminal support.
   - **sharp**: For image processing.
-  - **keytar**: For secure credential storage.
+  - **keytar**: Credential storage via a file-based JS bypass (no `libsecret` required).
 - Sets up a clipboard wrapper using `termux-api`.
 - Configures `ripgrep` for code search.
+- Sets `NODE_OPTIONS` in `~/.bash_profile` and `~/.bashrc` to load the keytar bypass.
 
 ## Installation
 
-1.  Clone this repository or download the `setup.sh` file to your Termux home directory.
-2.  Make the script executable:
-    ```bash
-    chmod +x setup.sh
-    ```
-3.  Run the setup script:
-    ```bash
-    ./setup.sh
-    ```
+> **Note:** The script must run from Termux's internal storage (`~/` or a subdirectory). Android mounts external storage with `noexec`, so the script cannot execute from `/sdcard` or an SD card.
 
-The script will guide you through the installation process. It may take some time to compile the native modules.
+**One-liner (recommended):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/YOUR_USER/copilot-termux-setup/main/setup.sh | bash
+```
+
+**Or clone and run:**
+```bash
+cd ~
+git clone https://github.com/YOUR_USER/copilot-termux-setup.git
+bash copilot-termux-setup/setup.sh
+```
+
+The script will guide you through the installation process. It may take several minutes to compile the native modules.
 
 ## Usage
 

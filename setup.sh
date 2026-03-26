@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/data/data/com.termux/files/usr/bin/bash
 
 # Ensure running under Termux
 if [ -z "${TERMUX_VERSION:-}" ]; then
@@ -162,7 +162,7 @@ fi
 # STEP 1: Ensure GitHub Copilot CLI installed globally
 ################################################################################
 
-print_step "Step 1/10: Installing GitHub Copilot CLI globally"
+print_step "Step 1/11: Installing GitHub Copilot CLI globally"
 
 print_info "Running npm install -g @github/copilot to ensure CLI is present"
 if npm install -g @github/copilot; then
@@ -179,7 +179,7 @@ fi
 
 cd "$INSTALL_ROOT"
 
-print_step "Step 2/10: Installing system dependencies"
+print_step "Step 2/11: Installing system dependencies"
 
 ensure_pkg glib
 ensure_pkg xorgproto
@@ -234,7 +234,7 @@ else
     print_warning "No system rg found; Copilot may fail to use ripgrep"
 fi
 
-print_step "Step 3/10: Installing node-pty"
+print_step "Step 3/11: Installing node-pty"
 
 if npm install node-pty; then
     print_success "node-pty installed successfully"
@@ -251,7 +251,7 @@ else
     exit 1
 fi
 
-print_step "Step 4/10: Installing node-addon-api and keytar"
+print_step "Step 4/11: Installing node-addon-api and keytar"
 
 npm install node-addon-api@latest --save-dev
 if npm install keytar --ignore-scripts; then
@@ -262,7 +262,7 @@ else
 fi
 
 
-print_step "Step 5/10: Patching node-addon-api enum handling"
+print_step "Step 5/11: Patching node-addon-api enum handling"
 find node_modules -name "napi.h" | while read -r NAPI_HEADER; do
     if grep -q "static_cast<napi_typedarray_type>(-1)" "$NAPI_HEADER"; then
         cp "$NAPI_HEADER" "$NAPI_HEADER.backup"
@@ -274,7 +274,7 @@ find node_modules -name "napi.h" | while read -r NAPI_HEADER; do
     fi
 done
 
-print_step "Step 6/10: Installing sharp"
+print_step "Step 6/11: Installing sharp"
 if npm install sharp; then
     print_success "sharp installed and compiled successfully"
 else
@@ -282,24 +282,111 @@ else
     print_warning "Copilot CLI will work but without image processing features"
 fi
 
-print_step "Step 7/10: Building keytar with patched dependencies"
+print_step "Step 7/11: Setting up keytar (file-based bypass for Termux)"
 
-cd node_modules/keytar
+# keytar requires libsecret-1 which is not available in Termux.
+# Instead of compiling the native addon, we intercept require('keytar') via
+# a Node.js Module._load hook and return a file-based credential store.
 
-if npm run build; then
-    print_success "keytar compiled successfully"
-else
-    print_error "Failed to compile keytar"
-    cd ../..
-    exit 1
+mkdir -p "$HOME/.copilot-hooks"
+
+cat > "$HOME/.copilot-hooks/keytar-bypass.js" << 'KEYTARBYPASS'
+// File-based keytar bypass for Termux (replaces libsecret with JSON file storage)
+'use strict';
+const Module = require('module');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const originalLoad = Module._load;
+
+const CREDS_FILE = path.join(os.homedir(), '.config', 'copilot-termux', 'credentials.json');
+
+function loadStore() {
+  try {
+    if (fs.existsSync(CREDS_FILE)) {
+      return JSON.parse(fs.readFileSync(CREDS_FILE, 'utf8'));
+    }
+  } catch (e) {}
+  return {};
+}
+
+function saveStore(store) {
+  fs.mkdirSync(path.dirname(CREDS_FILE), { recursive: true });
+  fs.writeFileSync(CREDS_FILE, JSON.stringify(store, null, 2), { mode: 0o600 });
+}
+
+const keytarImpl = {
+  getPassword(service, account) {
+    const store = loadStore();
+    return Promise.resolve(store[`${service}\x00${account}`] || null);
+  },
+  setPassword(service, account, password) {
+    const store = loadStore();
+    store[`${service}\x00${account}`] = password;
+    saveStore(store);
+    return Promise.resolve();
+  },
+  deletePassword(service, account) {
+    const store = loadStore();
+    const key = `${service}\x00${account}`;
+    const existed = key in store;
+    if (existed) { delete store[key]; saveStore(store); }
+    return Promise.resolve(existed);
+  },
+  findCredentials(service) {
+    const store = loadStore();
+    const prefix = `${service}\x00`;
+    return Promise.resolve(
+      Object.entries(store)
+        .filter(([k]) => k.startsWith(prefix))
+        .map(([k, password]) => ({ account: k.slice(prefix.length), password }))
+    );
+  },
+  findPassword(service) {
+    const store = loadStore();
+    const prefix = `${service}\x00`;
+    const entry = Object.entries(store).find(([k]) => k.startsWith(prefix));
+    return Promise.resolve(entry ? entry[1] : null);
+  }
+};
+
+Module._load = function(request, parent, isMain) {
+  if (request === 'keytar' ||
+      request.endsWith('keytar.node') ||
+      (request.includes('/keytar/') && request.endsWith('.node'))) {
+    return keytarImpl;
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
+KEYTARBYPASS
+
+print_success "keytar bypass created at ~/.copilot-hooks/keytar-bypass.js"
+
+# Termux login shells source ~/.bash_profile, not ~/.bashrc.
+# Write to ~/.bash_profile; create it with a ~/.bashrc source if it doesn't exist.
+BASH_PROFILE="$HOME/.bash_profile"
+BYPASS_LINE='export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require $HOME/.copilot-hooks/keytar-bypass.js"'
+if [ ! -f "$BASH_PROFILE" ]; then
+    { echo "# ~/.bash_profile - sourced by login shells (Termux default)";
+      echo '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"'; } > "$BASH_PROFILE"
 fi
+if ! grep -qF 'keytar-bypass.js' "$BASH_PROFILE" 2>/dev/null; then
+    { echo ""; echo "# GitHub Copilot CLI - keytar bypass for Termux"; echo "$BYPASS_LINE"; } >> "$BASH_PROFILE"
+    print_success "Added keytar bypass to ~/.bash_profile"
+else
+    print_info "keytar bypass already in ~/.bash_profile"
+fi
+# Also keep ~/.bashrc in sync for non-login shells
+BASHRC="$HOME/.bashrc"
+if ! grep -qF 'keytar-bypass.js' "$BASHRC" 2>/dev/null; then
+    { echo ""; echo "# GitHub Copilot CLI - keytar bypass for Termux"; echo "$BYPASS_LINE"; } >> "$BASHRC"
+fi
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--require $HOME/.copilot-hooks/keytar-bypass.js"
 
-cd ../..
-
-print_step "Step 8/10: Installing termux-api for clipboard support"
+print_step "Step 8/11: Installing termux-api for clipboard support"
 ensure_pkg termux-api termux-clipboard-get
 
-print_step "Step 9/10: Setting up clipboard (Termux API wrapper)"
+print_step "Step 9/11: Setting up clipboard (Termux API wrapper)"
 if [ ! -f "clipboard/index.cjs" ] || [ ! -f "clipboard/android-impl.cjs" ]; then
     mkdir -p clipboard
     if [ ! -f "clipboard/index.cjs" ]; then
@@ -558,7 +645,8 @@ mkdir -p "prebuilds/$ANDROID_ARCH"
 KEYTAR_PATH="$INSTALL_ROOT/node_modules/keytar/build/Release/keytar.node"
 PTY_PATH="$INSTALL_ROOT/node_modules/node-pty/build/Release/pty.node"
 
-[ -f "$KEYTAR_PATH" ] && ln -sf "$KEYTAR_PATH" "prebuilds/$ANDROID_ARCH/keytar.node" && print_success "keytar.node symlinked" || { print_error "keytar.node not found"; exit 1; }
+# keytar.node is not compiled (no libsecret-1 in Termux) — bypass hook handles it
+[ -f "$KEYTAR_PATH" ] && ln -sf "$KEYTAR_PATH" "prebuilds/$ANDROID_ARCH/keytar.node" && print_success "keytar.node symlinked" || print_info "keytar.node not compiled — JS bypass will be used instead"
 [ -f "$PTY_PATH" ] && ln -sf "$PTY_PATH" "prebuilds/$ANDROID_ARCH/pty.node" && print_success "pty.node symlinked" || { print_error "pty.node not found"; exit 1; }
 
 print_step "Step 11/11: Verifying installation"
@@ -632,16 +720,16 @@ echo "  • glib, xorgproto, rust, libvips, pkg-config"
 echo "  • ripgrep, termux-api"
 echo ""
 echo "Native Modules Built:"
-echo "  • keytar (credential storage)"
-echo "  • node-pty (terminal/command execution)"
-echo "  • sharp (image processing)"
+echo "  • node-pty (terminal/command execution) — compiled native"
+echo "  • sharp (image processing) — compiled native"
+echo "  • keytar (credential storage) — JS file-based bypass (no libsecret needed)"
 echo "  • clipboard wrapper (Termux API integration)"
 echo ""
 echo "Modified Files:"
 echo "  • ~/.gyp/include.gypi (node-gyp config)"
 echo "  • Patched node-addon-api enum handling"
 echo "  • Created clipboard/index.cjs and clipboard/android-impl.cjs"
-echo "  • Symlinked prebuilds/$ANDROID_ARCH/keytar.node"
+echo "  • ~/.copilot-hooks/keytar-bypass.js (credential store bypass)"
 echo "  • Symlinked prebuilds/$ANDROID_ARCH/pty.node"
 echo "  • Symlinked ripgrep to Copilot expected path"
 echo ""
@@ -651,9 +739,10 @@ print_header "Installation Complete!"
 echo "GitHub Copilot CLI is ready on Android/Termux ($ANDROID_ARCH)"
 echo ""
 echo "Next steps:"
-echo "  1. Launch Copilot: copilot"
-echo "  2. Sign in: /login"
-echo "  3. Start coding with AI assistance!"
+echo "  1. Reload your shell config: source ~/.bash_profile"
+echo "  2. Launch Copilot: copilot"
+echo "  3. Sign in: /login"
+echo "  4. Start coding with AI assistance!"
 echo ""
 
 print_success "Setup completed successfully!"
